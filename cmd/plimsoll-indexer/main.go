@@ -57,6 +57,13 @@ func run(cfg config.Config, log *slog.Logger) error {
 	}
 	defer db.Close()
 
+	var rpcClients []worker.EventSource
+	for _, u := range cfg.RPCURLs {
+		c := rpcclient.NewClient(u, &http.Client{Timeout: 30 * time.Second})
+		defer c.Close()
+		rpcClients = append(rpcClients, c)
+	}
+
 	rpc := rpcclient.NewClient(cfg.RPCURL, &http.Client{Timeout: 30 * time.Second})
 	defer rpc.Close()
 	hz := horizon.NewClient(cfg.HorizonURL)
@@ -73,6 +80,8 @@ func run(cfg config.Config, log *slog.Logger) error {
 
 	ingester := &worker.Ingester{
 		RPC:         rpc,
+		RPCs:        rpcClients,
+		RPCURLs:     cfg.RPCURLs,
 		Store:       db,
 		ContractIDs: []string{cfg.CoverageLedgerID, cfg.ReporterRegistryID},
 		StartLedger: cfg.StartLedger,
