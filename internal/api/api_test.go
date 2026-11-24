@@ -397,6 +397,28 @@ func TestWebhookSecretReturnedOnlyAtCreation(t *testing.T) {
 	}
 }
 
+func TestDocsUI(t *testing.T) {
+	srv := server()
+	defer srv.Close()
+	for _, path := range []string{"/docs", "/docs/"} {
+		resp, err := http.Get(srv.URL + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s status %d want 200", path, resp.StatusCode)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), "swagger-ui") || !strings.Contains(string(body), "/openapi.yaml") {
+			t.Fatalf("%s expected Swagger UI referencing /openapi.yaml, got: %s", path, string(body))
+		}
+	}
+}
+
 func TestMetricsEndpoint(t *testing.T) {
 	srv := server()
 	defer srv.Close()

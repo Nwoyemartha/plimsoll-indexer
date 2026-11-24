@@ -1,10 +1,16 @@
 // Package api serves Plimsoll's read API over HTTP.
+//
+// @title Plimsoll Indexer API
+// @version 1.0.0
+// @description OpenAPI 3.0 specification for Plimsoll read API over HTTP.
+// @license.name Apache 2.0
+// @license.url http://www.apache.org/licenses/LICENSE-2.0.html
+// @BasePath /
 package api
 
 import (
 	"context"
 	"crypto/subtle"
-	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,14 +22,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/stellar/go-stellar-sdk/strkey"
+
+	"github.com/plimsoll-protocol/plimsoll-indexer/docs"
 	"github.com/plimsoll-protocol/plimsoll-indexer/internal/coverage"
 	"github.com/plimsoll-protocol/plimsoll-indexer/internal/metrics"
 	"github.com/plimsoll-protocol/plimsoll-indexer/internal/store"
 	"github.com/plimsoll-protocol/plimsoll-indexer/internal/webhook"
 )
-
-//go:embed openapi.yaml
-var openAPISpec []byte
 
 // Reader is what the API needs from storage.
 type Reader interface {
@@ -70,6 +77,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /metrics", s.metrics)
 	mux.HandleFunc("GET /openapi.yaml", s.openAPI)
+	mux.HandleFunc("GET /docs", s.docsUI)
+	mux.HandleFunc("GET /docs/", s.docsUI)
 	mux.HandleFunc("GET /v1/network", s.network)
 	mux.HandleFunc("GET /v1/assets", s.listAssets)
 	mux.HandleFunc("GET /v1/assets/{sac}", s.getAsset)
@@ -177,6 +186,13 @@ func (s *Server) toCoverage(r *coverage.Result) *coverageJSON {
 
 // ---- handlers -------------------------------------------------------------
 
+// @Summary Health check and indexer sync status
+// @Description Reports database reachability and progress of the contract event ingestion loop.
+// @Tags system
+// @Produce json
+// @Success 200 {object} map[string]any
+// @Failure 503 {object} map[string]string
+// @Router /healthz [get]
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	if err := s.Store.Ping(r.Context()); err != nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "db_unavailable"})
@@ -202,6 +218,12 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, body)
 }
 
+// @Summary Prometheus metrics endpoint
+// @Description Exposes standard Go runtime metrics plus custom indexer metrics.
+// @Tags metrics
+// @Produce text/plain
+// @Success 200 {string} string "Prometheus text exposition format"
+// @Router /metrics [get]
 func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	if s.Store != nil {
 		if assets, err := s.Store.ListAssets(r.Context()); err == nil {
@@ -218,16 +240,70 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	promhttp.Handler().ServeHTTP(w, r)
 }
 
+// @Summary Get OpenAPI 3.0 specification
+// @Description Serves the OpenAPI specification in YAML format.
+// @Tags docs
+// @Produce application/yaml
+// @Success 200 {string} string "OpenAPI YAML specification"
+// @Router /openapi.yaml [get]
 func (s *Server) openAPI(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/yaml")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(openAPISpec)
+	_, _ = w.Write(docs.OpenAPISpec)
 }
 
+const swaggerUIHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Plimsoll Indexer API Docs</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css" />
+</head>
+<body>
+<div id="swagger-ui"></div>
+<script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js" crossorigin></script>
+<script>
+  window.onload = () => {
+    window.ui = SwaggerUIBundle({
+      url: '/openapi.yaml',
+      dom_id: '#swagger-ui',
+    });
+  };
+</script>
+</body>
+</html>`
+
+// @Summary Interactive API documentation
+// @Description Serves Swagger UI documentation for the indexer API.
+// @Tags docs
+// @Produce html
+// @Success 200 {string} string "HTML documentation page"
+// @Router /docs [get]
+func (s *Server) docsUI(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(swaggerUIHTML))
+}
+
+// @Summary Discover network parameters and contract IDs
+// @Description Discover network parameters and contract IDs for client configuration.
+// @Tags network
+// @Produce json
+// @Success 200 {object} NetworkInfo
+// @Router /v1/network [get]
 func (s *Server) network(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.Network)
 }
 
+// @Summary List all tracked assets with coverage and reports
+// @Description Returns all assets currently tracked on the coverage ledger.
+// @Tags assets
+// @Produce json
+// @Param min_tier query int false "Minimum report tier (1=transcribed, 2=issuer_signed, 3=auditor_signed)" Enums(1, 2, 3) default(1)
+// @Success 200 {object} map[string]any
+// @Failure 400 {object} map[string]string
+// @Router /v1/assets [get]
 func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 	minTier, ok := parseTier(w, r)
 	if !ok {
@@ -250,6 +326,16 @@ func (s *Server) listAssets(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"assets": out})
 }
 
+// @Summary Get asset details, latest supply, reports, and coverage
+// @Description Returns the specified asset with its coverage calculation and report history.
+// @Tags assets
+// @Produce json
+// @Param sac path string true "Stellar Asset Contract address"
+// @Param min_tier query int false "Minimum report tier" Enums(1, 2, 3) default(1)
+// @Success 200 {object} map[string]any
+// @Failure 400 {object} map[string]string
+// @Failure 404 {object} map[string]string
+// @Router /v1/assets/{sac} [get]
 func (s *Server) getAsset(w http.ResponseWriter, r *http.Request) {
 	sac, ok := parseSAC(w, r)
 	if !ok {
@@ -301,6 +387,14 @@ func (s *Server) assemble(ctx context.Context, a coverage.Asset, minTier uint32)
 	return out, nil
 }
 
+// @Summary Get historical supply snapshots for an asset
+// @Description Returns historical supply snapshots posted on chain for an asset.
+// @Tags supply
+// @Produce json
+// @Param sac path string true "Stellar Asset Contract address"
+// @Param limit query int false "Max snapshots to return" default(50)
+// @Success 200 {object} map[string]any
+// @Router /v1/assets/{sac}/supply [get]
 func (s *Server) supplyHistory(w http.ResponseWriter, r *http.Request) {
 	sac, ok := parseSAC(w, r)
 	if !ok {
@@ -325,6 +419,14 @@ func (s *Server) supplyHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"supply": out})
 }
 
+// @Summary Get historical reserve reports for an asset
+// @Description Returns historical reserve reports submitted for an asset.
+// @Tags reports
+// @Produce json
+// @Param sac path string true "Stellar Asset Contract address"
+// @Param limit query int false "Max reports to return" default(50)
+// @Success 200 {object} map[string]any
+// @Router /v1/assets/{sac}/reports [get]
 func (s *Server) reportHistory(w http.ResponseWriter, r *http.Request) {
 	sac, ok := parseSAC(w, r)
 	if !ok {
@@ -349,6 +451,12 @@ func (s *Server) reportHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"reports": out})
 }
 
+// @Summary List authorized reporters
+// @Description Returns all active registered reporters and their roles.
+// @Tags reporters
+// @Produce json
+// @Success 200 {object} map[string]any
+// @Router /v1/reporters [get]
 func (s *Server) reporters(w http.ResponseWriter, r *http.Request) {
 	list, err := s.Store.Reporters(r.Context())
 	if err != nil {
@@ -362,6 +470,14 @@ func (s *Server) reporters(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"reporters": out})
 }
 
+// @Summary Get canonical supply breakdown by hash
+// @Description Serves the canonical JSON breakdown stored for a posted supply snapshot.
+// @Tags breakdowns
+// @Produce json
+// @Param hash path string true "Hex-encoded SHA-256 hash of the breakdown JSON"
+// @Success 200 {string} string "Canonical JSON breakdown"
+// @Failure 404 {object} map[string]string
+// @Router /v1/breakdowns/{hash} [get]
 func (s *Server) breakdown(w http.ResponseWriter, r *http.Request) {
 	hash := r.PathValue("hash")
 	if !isBreakdownHash(hash) {
@@ -383,6 +499,17 @@ func (s *Server) breakdown(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
+// @Summary Register an issuer TOML change webhook
+// @Description Register a webhook to receive notifications when issuer TOML changes. Secret is returned only once at creation.
+// @Tags webhooks
+// @Accept json
+// @Produce json
+// @Param body body map[string]string true "Webhook configuration with url"
+// @Success 201 {object} map[string]any
+// @Failure 400 {object} map[string]string
+// @Failure 401 {object} map[string]string
+// @Failure 503 {object} map[string]string
+// @Router /v1/webhooks [post]
 func (s *Server) createWebhook(w http.ResponseWriter, r *http.Request) {
 	if !s.webhookConfigured(w) || !s.authorizeWebhookAdmin(w, r) {
 		return
@@ -431,6 +558,14 @@ func (s *Server) createWebhook(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// @Summary List registered webhooks without their secrets
+// @Description Returns all registered webhook destinations without sensitive secret material.
+// @Tags webhooks
+// @Produce json
+// @Success 200 {object} map[string]any
+// @Failure 401 {object} map[string]string
+// @Failure 503 {object} map[string]string
+// @Router /v1/webhooks [get]
 func (s *Server) listWebhooks(w http.ResponseWriter, r *http.Request) {
 	if !s.webhookConfigured(w) || !s.authorizeWebhookAdmin(w, r) {
 		return
@@ -447,6 +582,16 @@ func (s *Server) listWebhooks(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"webhooks": out})
 }
 
+// @Summary Delete a registered webhook
+// @Description Removes a registered webhook by ID.
+// @Tags webhooks
+// @Param id path int true "Webhook ID"
+// @Success 204 "Webhook deleted"
+// @Failure 400 {object} map[string]string
+// @Failure 401 {object} map[string]string
+// @Failure 404 {object} map[string]string
+// @Failure 503 {object} map[string]string
+// @Router /v1/webhooks/{id} [delete]
 func (s *Server) deleteWebhook(w http.ResponseWriter, r *http.Request) {
 	if !s.webhookConfigured(w) || !s.authorizeWebhookAdmin(w, r) {
 		return

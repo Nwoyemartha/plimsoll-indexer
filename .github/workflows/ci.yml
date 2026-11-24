@@ -22,6 +22,11 @@ jobs:
         run: go test -race ./...
       - name: Build
         run: go build -o bin/plimsoll-indexer ./cmd/plimsoll-indexer
+      - name: Verify OpenAPI spec
+        run: |
+          go install github.com/swaggo/swag/v2/cmd/swag@v2.0.0-rc6
+          make generate
+          git diff --exit-code docs/openapi.yaml
 
   lint:
     name: lint
