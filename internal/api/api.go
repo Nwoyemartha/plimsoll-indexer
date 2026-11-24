@@ -16,9 +16,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/stellar/go-stellar-sdk/strkey"
-
 	"github.com/plimsoll-protocol/plimsoll-indexer/internal/coverage"
+	"github.com/plimsoll-protocol/plimsoll-indexer/internal/metrics"
 	"github.com/plimsoll-protocol/plimsoll-indexer/internal/store"
 	"github.com/plimsoll-protocol/plimsoll-indexer/internal/webhook"
 )
@@ -69,6 +68,7 @@ type WebhookManager interface {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
+	mux.HandleFunc("GET /metrics", s.metrics)
 	mux.HandleFunc("GET /openapi.yaml", s.openAPI)
 	mux.HandleFunc("GET /v1/network", s.network)
 	mux.HandleFunc("GET /v1/assets", s.listAssets)
@@ -200,6 +200,22 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) {
 		body["last_event_age_seconds"] = int64(s.Now().Sub(p.EventAt).Seconds())
 	}
 	writeJSON(w, http.StatusOK, body)
+}
+
+func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
+	if s.Store != nil {
+		if assets, err := s.Store.ListAssets(r.Context()); err == nil {
+			metrics.ActiveAssets.Set(float64(len(assets)))
+		}
+		if p, err := s.Store.Progress(r.Context(), "plimsoll-events"); err == nil && !p.EventAt.IsZero() {
+			now := time.Now()
+			if s.Now != nil {
+				now = s.Now()
+			}
+			metrics.IngestLastEventAgeSeconds.Set(float64(now.Sub(p.EventAt).Seconds()))
+		}
+	}
+	promhttp.Handler().ServeHTTP(w, r)
 }
 
 func (s *Server) openAPI(w http.ResponseWriter, _ *http.Request) {

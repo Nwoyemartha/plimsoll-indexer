@@ -16,6 +16,7 @@ import (
 	"github.com/stellar/go-stellar-sdk/strkey"
 
 	"github.com/plimsoll-protocol/plimsoll-indexer/internal/coverage"
+	"github.com/plimsoll-protocol/plimsoll-indexer/internal/metrics"
 	"github.com/plimsoll-protocol/plimsoll-indexer/internal/store"
 	"github.com/plimsoll-protocol/plimsoll-indexer/internal/webhook"
 )
@@ -393,5 +394,49 @@ func TestWebhookSecretReturnedOnlyAtCreation(t *testing.T) {
 	if list.StatusCode != http.StatusOK || strings.Contains(string(listBody), response.Secret) ||
 		strings.Contains(string(listBody), "secret_hash") || strings.Contains(string(listBody), "secret_ciphertext") {
 		t.Fatalf("list response disclosed secret or failed: status=%d body=%s", list.StatusCode, listBody)
+	}
+}
+
+func TestMetricsEndpoint(t *testing.T) {
+	srv := server()
+	defer srv.Close()
+
+	// Ensure vec metrics have at least one sample so they appear in /metrics output
+	metrics.DBQueryDuration.WithLabelValues("ping").Observe(0.001)
+	metrics.EventsIngestedTotal.WithLabelValues("asset_listed").Inc()
+
+	resp, err := http.Get(srv.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d want 200", resp.StatusCode)
+	}
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(bodyBytes)
+
+	// Verify standard Go runtime metrics are exposed
+	if !strings.Contains(body, "go_goroutines") && !strings.Contains(body, "go_info") {
+		t.Error("expected Go runtime metrics in /metrics response")
+	}
+
+	// Verify custom metrics are present
+	customMetrics := []string{
+		"plimsoll_ingest_lag_ledgers",
+		"plimsoll_reports_per_minute",
+		"plimsoll_assets_active",
+		"plimsoll_db_query_duration_seconds",
+		"plimsoll_reports_ingested_total",
+		"plimsoll_events_ingested_total",
+		"plimsoll_ingest_last_event_age_seconds",
+	}
+	for _, m := range customMetrics {
+		if !strings.Contains(body, m) {
+			t.Errorf("expected metric %q in /metrics output", m)
+		}
 	}
 }

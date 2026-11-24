@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	protocol "github.com/stellar/go-stellar-sdk/protocols/rpc"
 
+	"github.com/plimsoll-protocol/plimsoll-indexer/internal/metrics"
 	"github.com/plimsoll-protocol/plimsoll-indexer/internal/soroban"
 	"github.com/plimsoll-protocol/plimsoll-indexer/internal/store"
 )
@@ -43,6 +45,7 @@ type Ingester struct {
 	StartLedger uint32
 	Log         *slog.Logger
 	currentRPC  int
+	reportTimes []time.Time
 }
 
 // Run pulls every available page once. Call it on a ticker.
@@ -100,6 +103,29 @@ func (in *Ingester) Run(ctx context.Context) error {
 		if err := in.Store.ApplyEvents(ctx, cursorName, resp.Cursor, resp.LatestLedger, decoded); err != nil {
 			return fmt.Errorf("apply events: %w", err)
 		}
+		if resp.LatestLedger > 0 {
+			if resp.LatestLedger >= progress.ScannedLedger && progress.ScannedLedger > 0 {
+				metrics.IngestLagLedgers.Set(float64(resp.LatestLedger - progress.ScannedLedger))
+			} else {
+				metrics.IngestLagLedgers.Set(0)
+			}
+		}
+		for _, ev := range decoded {
+			switch ev.(type) {
+			case soroban.AssetListed:
+				metrics.EventsIngestedTotal.WithLabelValues("asset_listed").Inc()
+			case soroban.SupplyPosted:
+				metrics.EventsIngestedTotal.WithLabelValues("supply_posted").Inc()
+			case soroban.ReservePosted:
+				metrics.EventsIngestedTotal.WithLabelValues("reserve_posted").Inc()
+				metrics.ReportsIngestedTotal.Inc()
+				in.recordReportTime(time.Now())
+			case soroban.ReporterSet:
+				metrics.EventsIngestedTotal.WithLabelValues("reporter_set").Inc()
+			case soroban.ReporterRevoked:
+				metrics.EventsIngestedTotal.WithLabelValues("reporter_revoked").Inc()
+			}
+		}
 		if len(decoded) > 0 {
 			in.Log.Info("ingested events", "count", len(decoded), "latest_ledger", resp.LatestLedger)
 		}
@@ -108,6 +134,19 @@ func (in *Ingester) Run(ctx context.Context) error {
 			return nil
 		}
 	}
+}
+
+func (in *Ingester) recordReportTime(now time.Time) {
+	cutoff := now.Add(-time.Minute)
+	valid := 0
+	for _, t := range in.reportTimes {
+		if t.After(cutoff) {
+			in.reportTimes[valid] = t
+			valid++
+		}
+	}
+	in.reportTimes = append(in.reportTimes[:valid], now)
+	metrics.ReportsPerMinute.Set(float64(len(in.reportTimes)))
 }
 
 // outsideRetention reports whether RPC refused the request because the ledger
