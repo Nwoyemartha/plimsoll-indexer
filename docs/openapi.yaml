@@ -168,6 +168,28 @@ paths:
       summary: Get asset details, latest supply, reports, and coverage
       tags:
       - assets
+    head:
+      description: Returns 200 when the asset is listed and 404 when it is not, so
+        clients can check existence without downloading the full asset document. The
+        response never has a body.
+      operationId: headAsset
+      parameters:
+      - description: Stellar Asset Contract address
+        in: path
+        name: sac
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: Asset is listed. No response body.
+        "400":
+          description: sac is not a contract strkey. No response body.
+        "404":
+          description: Asset is not listed. No response body.
+      summary: Check whether an asset is listed
+      tags:
+      - assets
   /v1/assets/{sac}/reports:
     get:
       description: Returns historical reserve reports submitted for an asset.
@@ -251,6 +273,22 @@ paths:
       summary: Get canonical supply breakdown by hash
       tags:
       - breakdowns
+  /v1/changelog:
+    get:
+      description: Machine-readable changelog, newest version first, generated from
+        CHANGELOG.yaml.
+      operationId: getChangelog
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                additionalProperties: {}
+                type: object
+          description: OK
+      summary: List breaking changes per released API version
+      tags:
+      - changelog
   /v1/network:
     get:
       description: Discover network parameters and contract IDs for client configuration.
